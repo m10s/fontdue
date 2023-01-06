@@ -446,6 +446,8 @@ impl<'a, U: Copy + Clone> Layout<U> {
             }
         }
 
+        let mut last_glyph_index = 0;
+
         let mut byte_offset = 0;
         while byte_offset < style.text.len() {
             let prev_byte_offset = byte_offset;
@@ -458,6 +460,14 @@ impl<'a, U: Copy + Clone> Layout<U> {
             } else {
                 Metrics::default()
             };
+
+            let kern_offset = if byte_offset > 0 {
+                font.horizontal_kern_indexed(last_glyph_index, glyph_index, style.px).unwrap_or(0.0)
+            } else {
+                0.0
+            };
+            last_glyph_index = glyph_index;
+
             let advance = ceil(metrics.advance_width);
 
             if linebreak >= self.linebreak_prev {
@@ -505,7 +515,7 @@ impl<'a, U: Copy + Clone> Layout<U> {
                 font_index: style.font_index,
                 parent: character,
                 byte_offset: prev_byte_offset,
-                x: floor(self.current_pos + metrics.bounds.xmin),
+                x: floor(self.current_pos + metrics.bounds.xmin + kern_offset),
                 y,
                 width: metrics.width,
                 height: metrics.height,
