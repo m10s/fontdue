@@ -2,9 +2,10 @@ use crate::layout::GlyphRasterConfig;
 use crate::math::{Geometry, Line};
 use crate::platform::{as_i32, ceil, floor, fract, is_negative};
 use crate::raster::Raster;
-use crate::table::TableKern;
+use crate::table::{load_gsub, TableKern};
 use crate::unicode;
 use crate::FontResult;
+use crate::{HashMap, HashSet};
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::*;
@@ -12,7 +13,6 @@ use core::hash::{Hash, Hasher};
 use core::mem;
 use core::num::NonZeroU16;
 use core::ops::Deref;
-use hashbrown::{HashMap, HashSet};
 use ttf_parser::{Face, FaceParsingError, GlyphId, Tag};
 
 #[cfg(feature = "parallel")]
@@ -167,6 +167,11 @@ pub struct FontSettings {
     /// glyphs rendered larger than this will looks worse but perform slightly better. The units of
     /// the scale are pixels per Em unit.
     pub scale: f32,
+    /// The default is true. If enabled, will load glyphs for substitutions (liagtures, etc.) from
+    /// the gsub table on compatible fonts. Only makes a difference when using indexed operations,
+    /// i.e. `Font::raserize_indexed`, as singular characters do not have enough context to be
+    /// substituted.
+    pub load_substitutions: bool,
 }
 
 impl Default for FontSettings {
@@ -174,6 +179,7 @@ impl Default for FontSettings {
         FontSettings {
             collection_index: 0,
             scale: 40.0,
+            load_substitutions: true,
         }
     }
 }
@@ -236,7 +242,7 @@ impl Font {
     pub fn from_bytes<Data: Deref<Target = [u8]>>(data: Data, settings: FontSettings) -> FontResult<Font> {
         let hash = crate::hash::hash(&data);
 
-        let face = match Face::from_slice(&data, settings.collection_index) {
+        let face = match Face::parse(&data, settings.collection_index) {
             Ok(f) => f,
             Err(e) => return Err(convert_error(e)),
         };
@@ -244,27 +250,32 @@ impl Font {
 
         // Optionally get kerning values for the font. This should be a try block in the future.
         let horizontal_kern: Option<HashMap<u32, i16>> = (|| {
-            let table: &[u8] = face.table_data(Tag::from_bytes(&b"kern"))?;
+            let table: &[u8] = face.raw_face().table(Tag::from_bytes(&b"kern"))?;
             let table: TableKern = TableKern::new(table)?;
             Some(table.horizontal_mappings)
         })();
 
         // Collect all the unique codepoint to glyph mappings.
         let glyph_count = face.number_of_glyphs();
-        let mut seen_mappings = HashSet::with_capacity(glyph_count as usize);
+        let mut indices_to_load = HashSet::with_capacity(glyph_count as usize);
         let mut char_to_glyph = HashMap::with_capacity(glyph_count as usize);
-        seen_mappings.insert(0u16);
+        indices_to_load.insert(0u16);
         if let Some(subtable) = face.tables().cmap {
             for subtable in subtable.subtables {
                 subtable.codepoints(|codepoint| {
                     if let Some(mapping) = subtable.glyph_index(codepoint) {
                         if let Some(mapping) = NonZeroU16::new(mapping.0) {
-                            seen_mappings.insert(mapping.get());
+                            indices_to_load.insert(mapping.get());
                             char_to_glyph.insert(unsafe { mem::transmute(codepoint) }, mapping);
                         }
                     }
                 })
             }
+        }
+
+        // If the gsub table exists and the user needs it, add all of its glyphs to the glyphs we should load.
+        if settings.load_substitutions {
+            load_gsub(&face, &mut indices_to_load);
         }
 
         let units_per_em = face.units_per_em() as f32;
@@ -293,13 +304,13 @@ impl Font {
         };
 
         #[cfg(not(feature = "parallel"))]
-        for index in seen_mappings {
+        for index in indices_to_load {
             glyphs[index as usize] = generate_glyph(index)?;
         }
 
         #[cfg(feature = "parallel")]
         {
-            let generated: Vec<(u16, Glyph)> = seen_mappings
+            let generated: Vec<(u16, Glyph)> = indices_to_load
                 .into_par_iter()
                 .map(|index| Ok((index, generate_glyph(index)?)))
                 .collect::<Result<_, _>>()?;
@@ -603,6 +614,12 @@ impl Font {
         let mut canvas = Raster::new(metrics.width * 3, metrics.height);
         canvas.draw(&glyph, scale * 3.0, scale, offset_x, offset_y);
         (metrics, canvas.get_bitmap())
+    }
+
+    /// Checks if the font has a glyph for the given character.
+    #[inline]
+    pub fn has_glyph(&self, character: char) -> bool {
+        self.lookup_glyph_index(character) != 0
     }
 
     /// Finds the internal glyph index for the given character. If the character is not present in
