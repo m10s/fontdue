@@ -2,10 +2,11 @@
 //!
 //! This is a no_std crate, but still requires the alloc crate.
 
-#![no_std]
+#![cfg_attr(all(not(test), not(feature = "std"), not(feature = "hashbrown")), no_std)]
 #![allow(dead_code)]
 #![allow(clippy::style)]
 #![allow(clippy::complexity)]
+#![allow(clippy::misnamed_getters)]
 
 extern crate alloc;
 
@@ -20,6 +21,11 @@ mod table;
 mod unicode;
 
 pub use crate::font::*;
+
+#[cfg(feature = "hashbrown")]
+pub(crate) use hashbrown::{HashMap, HashSet};
+#[cfg(not(feature = "hashbrown"))]
+pub(crate) use std::collections::{HashMap, HashSet};
 
 /// Alias for Result<T, &'static str>.
 pub type FontResult<T> = Result<T, &'static str>;
