@@ -468,7 +468,7 @@ impl<'a, U: Copy + Clone> Layout<U> {
             };
             last_glyph_index = glyph_index;
 
-            let advance = ceil(metrics.advance_width);
+            let advance = ceil(metrics.advance_width + kern_offset);
 
             if linebreak >= self.linebreak_prev {
                 self.linebreak_prev = linebreak;
